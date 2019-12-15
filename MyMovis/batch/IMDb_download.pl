@@ -8,27 +8,35 @@ IMDb_download - Program to download and unzip offline files from IMDb website
 
   IMDb_download [options]
   
-    --option <filename>     Read the options from a file, not commandline
-    --source <web-page>     What web-page to use
-    --target <directory>    Directory to be used as target for the download
-    --file <filename>       Name of a .gz to download e.g. title.akas.tsv.gz
-                            file parameter can be repeated multiple times
-    --quiet | noquiet       No output to standard output
-    --verbose | noverbose   Extended processing information on standard output
-    --help                  Show this help information
-    --manual                Manual, the more elaborate help
-    --version               Show version number
+    --option <filename>      Read the options from a file, not commandline
+    --source <web-page>      What web-page to use
+    --target <directory>     Directory to be used as target for the download
+    --file <filename>        Name of a .gz to download e.g. title.akas.tsv.gz
+                             file parameter can be repeated multiple times
+    --comment "qoted string" Comment to be noted for the file (one per file)
+    --quiet | noquiet        No output to standard output
+    --verbose | noverbose    Extended processing information on standard output
+    --help                   Show this help information
+    --manual                 Manual, the more elaborate help
+    --version                Show version number
     
-  Defaults if parameters are omitted are: 
+  Defaults are, if parameters are omitted: 
     --source https://datasets.imdbws.com/
     --target ../data/imdb/
-    --file title.akas.tsv.gz
-    --file title.basics.tsv.gz
-    --file title.crew.tsv.gz
-    --file title.episode.tsv.gz
-    --file title.principals.tsv.gz
     --file title.ratings.tsv.gz
+    --comment "rating and votes information for IMDb titles"
+    --file title.episode.tsv.gz
+    --comment "episode information for tv series"
+    --file title.basics.tsv.gz
+    --comment "titles in internet movie database (IMDb)"
+    --file title.akas.tsv.gz
+    --comment "alternatives for IMDb titles (also know as - AKA)"
+    --file title.crew.tsv.gz
+    --comment "director and writer information for all IMDb titles"
+    --file title.principals.tsv.gz
+    --comment "principal cast/crew for IMDb titles"
     --file name.basics.tsv.gz
+    --comment "names in internet movie database (IMDb)"
     --noquiet
     --noverbose
 =cut
@@ -38,98 +46,382 @@ IMDb_download - Program to download and unzip offline files from IMDb website
   Program to download the Internet Movie Database (IMDb) offline files. 
   Downloaded from https://datasets.imdbws.com/
  
-  If you use this program you must verify that you are compliant with the IMDb
- terms & conditions. This implementation bases on the specifications published
- on https://www.imdb.com/interfaces/ - accessed December 12th, 2019.
- 
-  This app is under Apache 2.0 license, see https://www.apache.org/licenses/
-
 =cut
 
 =head1 AUTHOR
 
-  guide2agile
-  --
-  https://github.com/guide2agile/MyMovis
+  guide2agile   https://github.com/guide2agile/MyMovis
 
-  $Id: IMDb_download $
+=cut
+
+=head1 LICENSE AND COPYRIGHT
+
+  This app is under Apache 2.0 license, see https://www.apache.org/licenses/
+
+  If you use this program you must verify that you are compliant with the IMDb
+ terms & conditions. This implementation bases on the specifications published
+ on https://www.imdb.com/interfaces/ - accessed December 13th, 2019.
 
 =cut
 
 use strict;
 use warnings;
 use Carp;
-use File::Copy;
-use Log::Log4perl;
-use YAML::AppConfig;
-use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
-use Getopt::Long 
-    qw(GetOptionsFromArray :config ignore_case_always auto_version auto_help);
-use Pod::Usage;
 use Cwd qw(getcwd abs_path);
-use File::Which;
+use DateTime;
 use File::Basename;
+use File::Copy;
+use File::Slurp;
+use File::Which;
+use Getopt::Long qw(GetOptionsFromArray :config ignore_case_always auto_version auto_help);
+use IO::Uncompress::Gunzip qw(gunzip $GunzipError);
+use Log::Log4perl;
+use LWP::UserAgent;
+use Pod::Usage;
 use Readonly;
+use String::Format;
 use Text::ParseWords;
+use YAML::AppConfig;
 
-our $VERSION = 0.6;
+our $VERSION = 0.7;
 
-# default values, some might get overwritten by config-file or commandline
-# logging & debug defaults
+#### error messages the system uses
+#
+# agreement on exit_codes (e.g. 0..99 -> INFO, 100..399 -> WARN etc)
+Readonly my $INFO_LEVELS  =>   1;   # i.e.   1.. 99
+Readonly my $WARN_LEVELS  => 200;   # i.e. 200..499
+Readonly my $ERROR_LEVELS => 500;   # i.e. 500..799
+Readonly my $FATAL_LEVELS => 800;   # i.e. 800..999
+Readonly my $HUNDREDS     => 100;   # to identify the Levels from a code
+#
+# user & configuration warnings
+Readonly my $WAR_181 => 181; # file is not a .gz file '$1'
+Readonly my $WAR_182 => 182; # working with yaml config '$1' failed, continuing without
+#
+# user & configuration errors
+Readonly my $ERR_481 => 481; # archive '$1' does not exist and could not be created $2
+Readonly my $ERR_482 => 482; # command line parameters: $1 there is an error in the parameter(s). Use '$2 --help' for more information
+Readonly my $ERR_483 => 483; # logging configuration file '$1' not found, processing aborted
+Readonly my $ERR_484 => 484; # inexistent file '$1'
+Readonly my $ERR_485 => 485; # optionfile '$1' not found
+Readonly my $ERR_486 => 486; # parameters '$1', '$2' is not understood, use '$2 --help' for more information
+Readonly my $ERR_487 => 487; # unknown parameter(s) '$1'
+Readonly my $ERR_488 => 488; # unuseable directory '$1'
+#
+# technical problems
+Readonly my $ERR_681 => 681; # gunzip failed: '$1'
+Readonly my $ERR_682 => 682; # not able to archive .gz file '$1'
+Readonly my $ERR_683 => 683; # parameter error in '$1': '$2'
+Readonly my $ERR_999 => 999; # general fatal error
+
+#### default values, some might get overwritten by config-file or commandline
+# logging, debug & config defaults
 Readonly my $DEFAULT_PAR_OPT_QUIET   => 0;
 Readonly my $DEFAULT_PAR_OPT_VERBOSE => 0;
 Readonly my $DEFAULT_LOG_WATCH_SEC   => 60;
 Readonly my $DEFAULT_LOGGER          => 'myMovis';
-Readonly my $DEFAULT_LOGLEVEL        => 'WARN';
-Readonly my $DEFAULT_LOG_CONFIGFILE  => '../config/logging.config';
-Readonly my $DEFAULT_CONFIG_FILE     => '../config/imdb_config.yaml';
-Readonly my $DEFAULT_IMDB_TARGET_DIR => "../data/imdb/";
-Readonly my $DEFAULT_IMDB_SOURCE     => "https://datasets.imdbws.com/";
-Readonly my @DEFAULT_IMDB_FILE_LIST  => (
-    "title.akas.tsv.gz",
-    "title.basics.tsv.gz",
-    "title.crew.tsv.gz",
-    "title.episode.tsv.gz",
-    "title.principals.tsv.gz",
-    "title.ratings.tsv.gz",
-    "name.basics.tsv.gz");
+Readonly my $DEFAULT_LOGLEVEL        => undef;
+Readonly my $DEFAULT_LOG_CONFIGFILE  => '../config/mymovis_logging.config';
+Readonly my $DEFAULT_CONFIG_FILE     => '../config/mymovis_config.yaml';
+#
+# application data defaults
+Readonly my $DEFAULT_IMDB_TARGET_DIR => '../data/imdb/';
+Readonly my $DEFAULT_IMDB_SOURCE     => 'https://datasets.imdbws.com/';
+Readonly my @DEFAULT_IMDB_FILE_LIST  => ('title.akas.tsv.gz', 'title.basics.tsv.gz', 'title.crew.tsv.gz', 'title.episode.tsv.gz',
+                                         'title.principals.tsv.gz', 'title.ratings.tsv.gz', 'name.basics.tsv.gz', );
 
-# effective values used
-my %imdb_file_comment;
-my @imdb_file_list;
-my $imdb_source;
-my $imdb_target_dir;
+### various constant declarations
+# numeric constants
+Readonly my $MINIMAL_DOWNLOAD_SIZE => 1_000_000;
+Readonly my $USAGE_SELECT_SECTIONS => 99;
+Readonly my $OS_DIR_SEP            => File::Spec->catfile( q{}, q{} );
+#
+# log levels
+Readonly my $DEBUG                 => 'DEBUG';
+Readonly my $INFO                  => 'INFO';
+Readonly my $WARN                  => 'WARN';
+Readonly my $ERROR                 => 'ERROR';
+Readonly my $FATAL                 => 'FATAL';
+
+#### global variable definitions
+# statistical data for the inform system
+my $start_time  = DateTime->now();
+my $debug_count = 0;
+my $info_count  = 0;
+my $warn_count  = 0;
+my $max_code    = 0;
+#
+# effective values used (based on defaults -> config file -> commandline)
 my $imdb_configfile   = $DEFAULT_CONFIG_FILE;
 my $log_configfile    = $DEFAULT_LOG_CONFIGFILE;
-my $log_logger        = $DEFAULT_LOGGER;
+my $loggername        = $DEFAULT_LOGGER;
 my $log_level         = $DEFAULT_LOGLEVEL;
 my $log_watch_seconds = $DEFAULT_LOG_WATCH_SEC;
 my $opt_quiet         = $DEFAULT_PAR_OPT_QUIET;
 my $opt_verbose       = $DEFAULT_PAR_OPT_VERBOSE;
+my $opt_dump = 0;
+my %imdb_file_comment;
+my @imdb_file_list;
+my $imdb_source_uri;
+my $imdb_target_dir;
 
-=head2 read_commandline
+#HTTP::Request->new( 'GET', 'https://datasets.imdbws.com/title.ratings.tsv.gz' );
 
-  Reading command line data.
+=head2 inform
+
+Informs on console and in logfile(s) about status, if code != 0 exits
 
 =cut
-sub read_commandline {
+sub inform {
+    my $par_level    = shift;
+    my $par_logger   = shift;
+    my $par_code     = shift;
+    my $par_text     = shift;
+    my @par_textvals = @_;
+    
+    # if variables %1 %2 etc in the $par_text then substitute with values from list
+    if (@par_textvals) {
+    	my $counter = 1;
+       foreach my $value (@par_textvals) {
+          $par_text =~ s/\%$counter/$value/gsxm;
+          $counter++;
+       }
+    }
+    
+    # make sure we have no undef parameter values
+    if (!defined($par_level)) {$par_level = $FATAL}
+    if (!defined($par_code))  {$par_code = $ERR_999}
+    if (!defined($par_text))  {$par_text = 'fatal program error, missing errormessage, processing ended'}
+
+    my $ret_val;
+
+    #TODO map text-parameters into text
+
+    # adapt console text (e.g. starts uppercase)
+    my $console_text = $par_text . ".";
+    $console_text =~ /^(.)(.*)/sxm;
+    $console_text = (uc $1) . $2; 
+    my $errorlevel;
+    {  # this block is for integer division
+       use integer;
+       $errorlevel = $par_code / $HUNDREDS; 
+    }
+
+    # while multiline and extra spaces might be good for display - they are removed for the logfile
+    $par_text =~ s/^\s*//sxm;
+    $par_text =~ s/\s*$//sxm;
+    $par_text =~ s/\r/\ \|\ /gsxm;
+    $par_text =~ s/\n/\ \|\ /gsxm;
+    $par_text =~ s/\ \|\ \ \|\ /\ \|\ /gsxm;
+    $par_text =~ s/\s{2,}/\ /gsxm;
+
+    # DEBUG only goes to logfile
+    if ($par_level eq $DEBUG) {
+       if ($par_code > $max_code) {$max_code = $par_code};
+       $debug_count++;
+       if ($par_code) {
+          $par_text = "[DEBUG #$par_code] " . $par_text;
+       }
+       if ($par_logger) {
+          $par_logger->debug($par_text)
+       }
+       return;
+    }
+    
+    # INFO goes to screen if verbose and goes to logfile, 
+    if ($par_level eq $INFO) {
+       if ($par_code > $max_code) {$max_code = $par_code};
+       $info_count++;
+       if (!$opt_quiet && $opt_verbose) {
+          $ret_val = print $console_text . "\n";
+       } else {
+          $ret_val = 1;
+       }
+       if ($par_code) {
+          $par_text = "[INFO #$par_code] " . $par_text;
+       }
+       if ($par_logger) {
+          $par_logger->info($par_text)
+       }
+       # return only on success, otherwise continue reporting the printing error
+       if ($ret_val) {
+          return;
+       } else {
+          $par_level = $FATAL;
+          $par_text .= '*** UNHANDLED FATAL ERROR *** Printing to console failed!';
+          $par_code  = $ERR_999;
+          $errorlevel = 9;
+       }
+    }
+    
+    # WARN goes to screen and goes to logfile, 
+    if ($par_level eq $WARN) {
+       if ($par_code > $max_code) {$max_code = $par_code};
+       $warn_count++;
+       if ($par_code) {
+          $console_text = "== WARNING #$par_code -  $console_text";
+       } else {
+          $console_text = "== WARNING -  $console_text";
+       }        
+       $ret_val = print {*STDERR} $console_text . "\n";
+       if ($par_code) {
+          $par_text = "[WARN #$par_code] " . $par_text;
+       }
+       if ($par_logger) {
+          $par_logger->warn($par_text)
+       }
+       # return only on success, otherwise continue reporting the printing error
+       if ($ret_val) {
+          return;
+       } else {
+          $par_level = $FATAL;
+          $par_text .= '*** UNHANDLED FATAL ERROR *** Printing to console failed!';
+          $par_code  = $ERR_999;
+          $errorlevel = 9;
+       }
+    }
+    
+    # ERROR goes to logfile and exits dying to screen
+    if ($par_level eq $ERROR) {
+       $! = $errorlevel;
+       $console_text = "### ERROR #$par_code -  $console_text";
+       $ret_val = print {*STDERR} $console_text . "\n";
+       if ($par_code) {
+          $par_text = "[ERROR #$par_code] " . $par_text;
+       }
+       if ($par_logger) {
+          $par_logger->error($par_text)
+       }
+       # die only on success, otherwise continue reporting the printing error
+       if ($ret_val) {
+          if ($opt_dump) {
+             $! = 
+             confess ("*** Scrippt stopped!\n");
+          } else {
+             $! = 
+             die ("*** Scrippt stopped!\n");
+          }
+       } else {
+          $par_level = $FATAL;
+          $par_text .= '*** UNHANDLED FATAL *** Big problems, even printing to console failed!';
+          $par_code  = $ERR_999;
+          $errorlevel = 9;
+       }
+    }
+
+    # FATAL goes to logfile and exits dying to screen
+    if ($par_level eq $FATAL) {
+       $! = $errorlevel;
+       if ($par_code) {
+          $par_text = "[FATAL #$par_code] " . $par_text;
+       }
+       if ($par_logger) {
+          $par_logger->logconfess($par_text);
+       }
+       confess($par_text);
+    }
+    
+    # if we got here, we have a problem. We should have exited or died above
+    $par_logger->fatal("   *** $par_level *** UNHANDLED INFORM CODE #$par_code *** $par_text");
+    confess ("   *** $par_level *** UNHANDLED INFORM CODE #$par_code *** $par_text"); 
+}
+
+=head2 start_logging
+
+Prepare logging based on global logging configuration file.
+
+=cut
+sub start_logging {
+
+    # check if requested configuration file can be used
+    if ( !-f $log_configfile ) {
+        inform $ERROR, undef, $ERR_483, "logging configuration file '%1' not found, processing aborted",$log_configfile;
+    }
+
+    # initialize and configure logging as requested by parameters/defaults
+    Log::Log4perl->init_and_watch( $log_configfile, $log_watch_seconds );
+    my $logger = Log::Log4perl->get_logger($loggername);
+    if ($log_level) { $logger->level($log_level) }
+
+    # log event that logging is active now
+    inform $DEBUG, $logger, 0, "logging started: config '%1', logger '%2', read config every %3 seconds",
+                                $log_configfile, $loggername,$log_watch_seconds;
+    # done initializing, return the logger constructed
+    return $logger;
+}
+
+=head2 inform_end
+
+Reports completion of the script setting exitstate to the value given
+
+=cut
+sub inform_end {
+    my $par_logger = shift;
+    my $par_exit   = shift;
+
+    # note $end_time and calculate how long the script ran
+    my $end_time        = DateTime->now();
+    my $end_time_string = $end_time->datetime(q{ });
+    my $elapsed_time    = $end_time->epoch() - $start_time->epoch();
+
+    inform $INFO, $par_logger, 0, "script completed at %1 after %2 seconds", $end_time_string, $elapsed_time;
+    exit $par_exit;
+}
+
+=head2 inform_start
+
+Reports start of the script setting exitstate to the value given
+
+=cut
+sub inform_start {
+
+    # initialize logging and note start of application
+    my $logger = start_logging();
+    my $start_time_string = $start_time->datetime(q{ });
+    inform $INFO, $logger, 0, "Script '%1' started at %2", clean_dir($0), $start_time_string;
+    return $logger;
+}
+
+=head2 clean_dir
+
+Turns directory separating slashes or backslashes into correct one for the OS.
+
+=cut
+sub clean_dir {
+    my $dir_to_clean = shift;
+
+    $dir_to_clean =~ s/\//$OS_DIR_SEP/gsxm;
+    $dir_to_clean =~ s/\\/$OS_DIR_SEP/gsxm;
+
+    return $dir_to_clean;
+}
+
+=head2 read_parameters
+
+  Reading like command line parameters, but from the array provided.
+
+=cut
+sub read_parameters {
     my $parameter_ref = shift;
 
     # process options
     my @parameters_in_use = @$parameter_ref;
+    my $parameter_string  = join q{ }, @parameters_in_use;
     my $return_status     = GetOptionsFromArray(
         $parameter_ref,
 
         # data configuration
-        'file=s'           => \@imdb_file_list,
-        'source=s'         => \$imdb_source,
+        'files=s'          => \@imdb_file_list,
+        'comments=s'       => \my @local_file_comment,
+        'source=s'         => \$imdb_source_uri,
         'target=s'         => \$imdb_target_dir,
         'appconfig|yaml=s' => \$imdb_configfile,
         'logconfig=s'      => \$log_configfile,
-        'logger=s'         => \$log_logger,
+        'logger=s'         => \$loggername,
         'loglevel=s'       => \$log_level,
         'logwatch|watch=i' => \$log_watch_seconds,
         'debug'            => \my $local_opt_debug,
+        'dump'             => \$opt_dump,
         'info'             => \my $local_opt_info,
         'quiet!'           => \$opt_quiet,
         'verbose!'         => \$opt_verbose,
@@ -137,236 +429,401 @@ sub read_commandline {
         'optionfile=s'     => \my $local_option_file,
     );
     if ( !$return_status ) {
-        print "You specified these command line perameters:\n";
-        print join ' ', @parameters_in_use . "\n";
-        print "Not able to understand the parameter(s) specified.\n";
-        croak "Use '" . basename($0) . " --help' for more information\n"
+        inform $ERROR, undef, $ERR_482, "command line parameters:\n" 
+                                 . "$parameter_string\n"
+                                 . "there is an error in the parameter(s),\n"
+                                 . "use '" . basename($0) . " --help' for "
+                                 . "more information";
     }
     if (@$parameter_ref) {
-       # parameter list not empty means unprocessed content remained
-       croak "You submitted parameters '@parameters_in_use'.\nThe following parameters are not understood '@$parameter_ref', use --help for usage."; 
+
+        # parameter list not empty means unprocessed content remained
+        inform $ERROR, undef, $ERR_486, "parameters '@parameters_in_use', "
+          . "'@$parameter_ref' is not understood, use '" . basename($0) 
+          . " --help' for more information";
     }
-    
+
     if ($local_opt_manual) {
-       #TODO define sections making up the full content
-       pod2usage( -verbose => 99, 
-                  -sections => "NAME|DESCRIPTION|OPTIONS|EXAMPLES|AUTHOR" );
-       exit;
+        pod2usage(
+            -verbose  => $USAGE_SELECT_SECTIONS,
+            -sections => "NAME|DESCRIPTION|SYNOPSIS|OPTIONS|AUTHOR"
+        );
     }
-    
+
+    # store file comments received in the corresponding hash
+    if (@local_file_comment) {
+        my $file_count = 0;
+        my $one_comment;
+        foreach my $one_file (@imdb_file_list) {
+            if ( defined( $local_file_comment[$file_count] ) ) {
+                $one_comment = $local_file_comment[$file_count];
+            }
+            $one_file =~ s/[.]gz$//sxm;
+            $imdb_file_comment{$one_file} = $one_comment;
+            $file_count++;
+        }
+    }
+
+    # logging options that are shortcuts for log_levels
     if ($local_opt_info) {
-       $log_level = 'INFO';
+        $log_level = 'INFO';
     }
     if ($local_opt_debug) {
-       $log_level = 'DEBUG';
+        $log_level = 'DEBUG';
     }
 
+    # process if option-file specified
     if ($local_option_file) {
-       if ( !-f $local_option_file ) {
-          # optionfile does not exist/is not accessible
-          croak "Specified optionfile '$local_option_file' not found!";
-       }
+        if ( !-f $local_option_file ) {
 
-       # re-read parameters from file
-       my @options = read_file( $local_option_file, chomp => 1 );
+            # optionfile does not exist/is not accessible
+            inform $ERROR, undef, $ERR_485, "optionfile '$local_option_file' not found";
+        }
 
-       # new backup copy of parameters, are changed by options file
-       my $parameter_list = join ' ', @options;
-       $parameter_list =~ s/\r/ /gsxm;
-       $parameter_list =~ s/\n/ /gsxm;
-       $parameter_list =~ s/\ \ /\ /gsxm;
-       my @local_parameters = shellwords($parameter_list);
+        # re-read parameters from file
+        my @options = read_file( $local_option_file, chomp => 1 );
 
-       # repeat the analysis with 
-       read_application_parameters( \@local_parameters );
+        # new backup copy of parameters, are changed by options file
+        my $parameter_list = join q{ }, @options;
+        $parameter_list =~ s/\r/ /gsxm;
+        $parameter_list =~ s/\n/ /gsxm;
+        $parameter_list =~ s/\ \ /\ /gsxm;
+        my @local_parameters = shellwords($parameter_list);
+
+        # repeat the analysis with
+        read_parameters( \@local_parameters );
     }
 }
 
-=head2 read_config_file
+=head2 read_configfile
 
 Readig data specifications from yaml file.
   
 =cut
-sub read_config_file {
+sub read_configfile {
 
-#TODO LOGGING    # get logger to enable logging, start logging
-#    my $log_loc_logger = Log::Log4perl->get_logger($log_logger);
+    my $logger = Log::Log4perl->get_logger($loggername);
 
     # read configuration file to object yaml_config
     my $yaml_config = YAML::AppConfig->new( file => $imdb_configfile );
-    if (!defined ($yaml_config)) {
-       #TODO no config file warn and continue
-       return;
+    if ( !defined($yaml_config) ) {
+
+        # inform, set defaults and return
+        inform $WARN, $logger, $WAR_182, "working with yaml config "
+                             . "'$imdb_configfile' failed, continuing without";
+        if ( !defined($imdb_target_dir) ) {
+            $imdb_target_dir = $DEFAULT_IMDB_TARGET_DIR;
+        }
+        if ( !defined($imdb_source_uri) ) {
+            $imdb_source_uri = $DEFAULT_IMDB_SOURCE;
+        }
+
+        if (@imdb_file_list) {
+            @imdb_file_list = @DEFAULT_IMDB_FILE_LIST;
+        }
+        # file not found means nothing is left to do -> return
+        return;
     }
-    if (!defined($imdb_target_dir)) {
-       if (defined ($yaml_config->get_IMDB()->{'directory'})) {
-          $imdb_target_dir = $yaml_config->get_IMDB()->{'directory'};
-       } else {
-          $imdb_target_dir = $DEFAULT_IMDB_TARGET_DIR;
-       }
+    if ( !defined($imdb_target_dir) ) {
+        if ( defined( $yaml_config->get_IMDB()->{'directory'} ) ) {
+            $imdb_target_dir = $yaml_config->get_IMDB()->{'directory'};
+        }
+        else {
+            $imdb_target_dir = $DEFAULT_IMDB_TARGET_DIR;
+        }
     }
 
-    if (!defined($imdb_source)) {
-       if (defined ($yaml_config->get_IMDB()->{'download'})) {
-          $imdb_source = $yaml_config->get_IMDB()->{'download'};
-       } else {
-          $imdb_source = $DEFAULT_IMDB_SOURCE;
-       }
+    if ( !defined($imdb_source_uri) ) {
+        if ( defined( $yaml_config->get_IMDB()->{'download'} ) ) {
+            $imdb_source_uri = $yaml_config->get_IMDB()->{'download'};
+        }
+        else {
+            $imdb_source_uri = $DEFAULT_IMDB_SOURCE;
+        }
     }
 
-    # load all file definitions from configuration file
-    if (!(@imdb_file_list)) {
-#TODO FOR-LOOP
-       for (
-          my $counter = 0 ;
-          defined( my $files = $yaml_config->get_IMDB()->{'files'}[$counter] ) ;
-          $counter++
-          )
-       {  
-          my $file_name = 
-             $yaml_config->get_IMDB()->{'files'}[$counter]{'filename'};
-          push @imdb_file_list, $file_name;
-          $imdb_file_comment{ $file_name } =
-             $yaml_config->get_IMDB()->{'files'}[$counter]{'comment'};
-       }
+    # get the filenames only, if the list is empty
+    my $get_filenames = 1;
+    if (@imdb_file_list) {
+        $get_filenames = 0;
     }
-
-#TODO DUMP CONFIGURATION JUST READ to DEBUG logger
+    my $counter = 0;
+    while (
+        defined( my $files = $yaml_config->get_IMDB()->{'files'}[$counter] ) )
+    {
+        my $file_name =
+          $yaml_config->get_IMDB()->{'files'}[$counter]{'filename'};
+        if ($get_filenames) {
+            push @imdb_file_list, $file_name;
+        }
+        $imdb_file_comment{$file_name} =
+          $yaml_config->get_IMDB()->{'files'}[$counter]{'comment'};
+        $counter++;
+    }
 }
+
+=head2 gunzip_and_archive
+
+gunzip .gz file in directory provided, archive .gz in .\archive of directory.
+
+=cut
+sub gunzip_and_archive {
+    my $gz_file   = shift;
+    my $directory = shift;
+
+    # start logging
+    my $logger = Log::Log4perl->get_logger($loggername);
+
+    # check parameters of call
+    inform $DEBUG, $logger, 0, "sub unzip_and_archive called for file: "
+                             . "$gz_file directory: $directory";
+    if ( ( !defined($gz_file) ) || ( !defined($directory) ) ) {
+        my $error_string;
+        if ( !defined($gz_file) ) {
+            $error_string .= " $gz_file";
+        }
+        if ( !defined($directory) ) {
+            $error_string .= " $directory";
+        }
+        inform $ERROR, $logger, $ERR_487, "unknown parameter(s) '$error_string'";
+    }
+    if ( !-d $directory ) {
+        inform $ERROR, $logger, $ERR_488, "unuseable directory '$directory'";
+    }
+    if ( !-f $directory . $gz_file ) {
+        inform $ERROR, $logger, $ERR_484, "inexistent file '$directory$gz_file'";
+    }
+    if ( !( $gz_file =~ /[.]gz$/isxm ) ) {
+        inform $WARN, $WAR_181, "file is not a .gz file '$directory$gz_file'";
+    }
+
+    my $unzipped_file = $gz_file;
+
+    # name of unzipped file will be same as filename provided without .gz
+    $unzipped_file =~ s/[.]gz$//sxm;
+    if ( !-d "$directory/archive/" ) {
+
+        # if the archive folder is missing, try to create it
+        if ( !mkdir "$directory/archive/" ) {
+            inform $ERROR, $logger, $ERR_481, "archive '$imdb_target_dir/archive/'"
+                              . " does not exist and could not be created $!";
+        }
+        else {
+            inform $INFO, $logger, 0, "mkdir '$imdb_target_dir/archive/' "
+                                    . "- archive folder created";
+        }
+    }
+    inform $INFO, $logger, 0, "gunzip      '%1' => '%2' (in '%3')",$gz_file, $unzipped_file, $directory;
+#    inform $INFO, $logger, 0, "gunzip      '$gz_file' => "
+#                            . "'$unzipped_file' (in $directory)";
+    gunzip "$directory$gz_file" => "$directory$unzipped_file"
+      or inform $ERROR, $logger, $ERR_681, "gunzip failed: '$GunzipError'";
+    inform $INFO, $logger, 0, "archiving   '%1' to '%2'", $gz_file,clean_dir("$directory/archive/$gz_file");
+#    inform $INFO, $logger, 0, "archiving   '$gz_file' to " 
+#                            . clean_dir("$directory/archive/$gz_file");
+    if ( !( move( "$directory$gz_file", "$directory" . "archive/$gz_file" ) ) )
+    {
+        inform $ERROR, $logger, $ERR_682, "not able to archive .gz file '$directory$gz_file'";
+    }
+}
+
+=head2 file_download_unzip
+
+download file from source and store it in target directory.
+
+=cut
 
 sub file_download_unzip {
-    my $source = shift;
+    my $source        = shift;
     my $download_file = shift;
-    my $target_dir = shift;
-    
+    my $target_dir    = clean_dir(shift);
+    my $file_comment  = shift // q{};
+
+    my $logger = Log::Log4perl->get_logger($loggername);
+    if (   !defined($source)
+        || !defined($download_file)
+        || !defined($target_dir) )
+    {
+        my $error_string;
+        if ( !defined($source) ) {
+            $error_string .= " $source";
+        }
+        if ( !defined($download_file) ) {
+            $error_string .= " $download_file";
+        }
+        if ( !defined($target_dir) ) {
+            $error_string .= " $target_dir";
+        }
+
+        inform $ERROR, $logger, $ERR_683, "parameter error in 'file_download_unzip':"
+                                   . " '$error_string'";
+    }
+    inform $DEBUG, $logger, 0, "source:$source file:$download_file "
+                             . "target: $target_dir comment: $file_comment";
+    if ( $file_comment ne q{} ) { $file_comment = " - $file_comment" }
+
     my $sysCommand = "";
-    my $return = "";
+    my $return     = "";
 
-    if (!$opt_quiet) {
-       print "Downloading - " . $source . $download_file . "\n";
-    }
-    if (!$opt_quiet && $opt_verbose) {
-       print "Target      : " . $target_dir . $download_file . "\n";
+    inform $INFO, $logger, 0, "downloading '$source$download_file$file_comment'";
+    inform $INFO, $logger, 0, "to target   '$target_dir" . $download_file . "'";
+
+    # download file from source to targetfile
+    my $result1 = my $user_agent = LWP::UserAgent->new;
+    my $result2 = $user_agent->mirror( "$source$download_file",
+        "$target_dir$download_file" );
+
+    #TODO handle download errors?
+
+    # is size of download acceptable (bigger than $MINIMAL_DOWNLOAD_SIZE)
+    my $download_size = -s "$target_dir$download_file";
+    if ( $download_size < $MINIMAL_DOWNLOAD_SIZE ) {
+
+        # download failed
+        inform $INFO, $logger, 0, "download of '$target_dir$download_file' is"
+                                . " only $download_size bytes, did it fail?";
     }
 
-    if (!(which 'curl')) {
-       print {*STDERR} "Warning, perl was not able to find 'curl' utility.\n";
-       print {*STDERR} "So download might or might not work. "
-                     . "Make sure 'curl' utility is available";
-    }
-    $sysCommand = "curl -O $source$download_file "
-                . "-o $target_dir$download_file --create-dirs -s -S";
-    if ($return = `$sysCommand 2>&1`) {
-        print "Curl Command : " . $sysCommand . "\n";
-        print "Curl Returns : " . $return . "\n";
-    	die 'was not able to curl successfully';
-    }
-
-    my $unzipped_file = $download_file;
-    if (!$opt_quiet && $opt_verbose) {
-       print "gunzip      : " . $target_dir . $unzipped_file . "\n";
-    }
-    $unzipped_file =~ s/\.gz$//;
-    if (!-d './archive/') {
-       # if the archive folder is missing, create it
-       if (!mkdir './archive/') {
-          die "\nArchive folder '$imdb_target_dir/archive/' does not exist"
-            . " and could not create it $!.";
-       } else {
-          if (!$opt_quiet && $opt_verbose) {
-             print "mkdir       : Archive folder '$imdb_target_dir/archive/'"
-                 . " created\n";
-          }
-       }
-    }
-    if (!$opt_quiet && $opt_verbose) {
-       print "gunzip      : " . $target_dir . $unzipped_file . "\n";
-    }
-    gunzip $download_file => $unzipped_file 
-       or die "gunzip failed: $GunzipError\n";
-    if (!$opt_quiet && $opt_verbose) {
-       print "archive .gz : to  $target_dir/archive/$download_file\n";
-    }
-    if (!(move($download_file, './archive/' . $download_file))) {
-#          $log_loc_logger->error("specified $param_shortdesc file '$param_filename' "
-#                       . "exists and not able to rename it to "
-#                       . "'$local_backupname' $!.");
-#          report_problem ($param_errornum, "$param_shortdesc '$param_filename'"
-#                        . " already exists and not able to rename it to "
-#                        . "'$local_backupname' $!.");
-       die "\nwas not able to archive original .gz files"
-    } 
-    if (!$opt_quiet && $opt_verbose) {
-       print "\n";
+    # if we downloaded a .gz file we gunzip it and archive the original .gz
+    if ( $download_file =~ /[   .]gz$/isxm ) {
+        inform $DEBUG, $logger, 0, "gunzipping file $target_dir$download_file";
+        gunzip_and_archive( $download_file, $target_dir );
     }
 }
 
-sub initialize_logging {
-    # configuration loaded, start logging
-    if ( !-f $log_configfile ) {
-        confess("Logging configuration file '$log_configfile' not"
-              . " found, processing aborted!\n" );
-    }
-    
-    Log::Log4perl->init_and_watch( $log_configfile, 
-                                   $log_watch_seconds );
+=head2 check_and_adapt_path
 
-#TODO muss das nur einmal gesetzt werden, oder immer wieder beim Logger holen?
-    my $local_logger = Log::Log4perl->get_logger($log_logger);
-    if ($log_level) {
-       $local_logger->level($log_level);
-    }
-    
-    my $log_message = "logging started: config '$log_configfile', "
-                    . "logger '$log_logger', read config every "
-                    . "$log_watch_seconds seconds";
-    if ($log_level) {
-       $log_message = $log_message . ", log level '$log_level'"; 
-    }
-    $local_logger->debug( $log_message );
+Prepare logging based on global logging configuration file.
 
-    return $local_logger;
-   
+=cut
+
+sub check_and_adapt_path {
+    my $directory_name = shift;
+    my @directory_list = shift;
+    my $file_name      = shift // undef;
+
+    # if absolute path, just return what you got
+    if ( !( $directory_name =~ /^[.]/sxm ) ) {
+        return $directory_name;
+    }
+
+    if ( defined $file_name ) {
+
+        # a filename has been specified, check to find it
+        if ( -f $directory_name . $file_name ) {
+
+            # return absolute path
+            ( my $file, my $dir, my $ext ) =
+              fileparse( abs_path( $directory_name . $file_name, '\.[^.]*$' ) );
+            return $dir;
+        }
+        foreach my $directory (@directory_list) {
+            if ( -f $directory . $file_name ) {
+
+                # return absolute path
+                ( my $file, my $dir, my $ext ) =
+                  fileparse( abs_path( $directory . $file_name, '\.[^.]*$' ) );
+                return $dir;
+            }
+        }
+        if ( -f $file_name ) {
+
+            # make path absolute and return
+            ( my $file, my $dir, my $ext ) =
+              fileparse( abs_path( $file_name, '\.[^.]*$' ) );
+            return $dir;
+        }
+    }
+    else {
+        # just a directory
+        if ( -d abs_path($directory_name) ) {
+
+            # it exists without furter search
+            my $directory_found = abs_path($directory_name);
+            if ( !( $directory_found =~ /[\\\/]$/sxm ) ) {
+                $directory_found .= '/';
+            }
+            return $directory_found;
+        }
+        else {
+            foreach my $directory (@directory_list) {
+                if ( -d $directory . $directory_name ) {
+
+                    # return absolute path
+                    my $directory_found =
+                      abs_path( $directory . $directory_name );
+                    if ( !( $directory_found =~ /[\\\/]$/sxm ) ) {
+                        $directory_found .= '/';
+                    }
+                    return $directory_found;
+                }
+            }
+        }
+    }
+    return undef;
 }
 
 ############ MAIN ############
 
-#TODO if not quiet report starting time 
+# getting all that configuration values to be used and start logging
+read_parameters \@ARGV;
+my $logger = inform_start;
+read_configfile;
 
-read_config_file();
-read_commandline(\@ARGV);
-my $local_logger = initialize_logging();
+# make the config and directory path absolute
+inform $DEBUG, $logger, 0, "locations - appconfig: $imdb_configfile, "
+                      . "logconfig: $log_configfile, target: $imdb_target_dir";
 
-my $path_saved = getcwd;
-if (!$opt_quiet && $opt_verbose) {
-   print "Program started in directory " . abs_path($path_saved) . "\n";
-}
-chdir $imdb_target_dir;
-my $working_path = getcwd;
-if (!$opt_quiet && $opt_verbose) {
-   print "Switched to directory ".abs_path($working_path)." to work\n\n";
-}
+( my $scriptname, my $script_directory, my $script_extension ) =
+  fileparse( $0, '\.[^.]*$' );
+( my $appconfig, my $appconfig_dir, my $appconfig_ext ) =
+  fileparse( $imdb_configfile, '\.[^.]*$' );
+( my $logconfig, my $logconfig_dir, my $logconfig_ext ) =
+  fileparse( $log_configfile, '\.[^.]*$' );
+my $current_directory = abs_path( getcwd() ) . '/';
+$imdb_target_dir = clean_dir(
+    check_and_adapt_path(
+        $imdb_target_dir, [ $current_directory, $script_directory ]
+    )
+);
+my $script_directory_list =
+  [ $script_directory, $current_directory, $imdb_target_dir, ];
+my $current_directory_list =
+  [ $current_directory, $script_directory, $imdb_target_dir, ];
+$appconfig_dir = check_and_adapt_path( $appconfig_dir, $script_directory_list,
+    $appconfig . $appconfig_ext );
+$imdb_configfile = clean_dir( $appconfig_dir . $appconfig . $appconfig_ext );
+$logconfig_dir   = check_and_adapt_path( $logconfig_dir, $script_directory_list,
+    $logconfig . $logconfig_ext );
+$log_configfile = clean_dir( $logconfig_dir . $logconfig . $logconfig_ext );
 
+inform $DEBUG, $logger, 0, "absolute - appconfig: $imdb_configfile, "
+                     . "logconfig: $log_configfile, target: $imdb_target_dir";
 # process list of files to download
-while(my $imdb_file_to_download = shift(@imdb_file_list)) {
-   file_download_unzip ($imdb_source, 
-                        $imdb_file_to_download, 
-                        $imdb_target_dir,
-                        $imdb_file_comment{$imdb_file_to_download});
+while ( my $imdb_file_to_download = shift @imdb_file_list ) {
+    file_download_unzip( $imdb_source_uri, $imdb_file_to_download, $imdb_target_dir,
+        $imdb_file_comment{$imdb_file_to_download} );
 }
 
-chdir $path_saved;
-if (!$opt_quiet && $opt_verbose) {
-   print "Program switched directory back to $path_saved\n";
-}
+# mark completion and exit with success
+inform_end $logger, 0;
 
-#TODO if not quiet report ending time and time used
+__END__
 
-#TODO Logging
-#TOD DO I HAVE TO CLOSE THE LOGGER BEFORE PROGRAM FINISHES
+=head1 EXIT STATUS
 
-#TODO how can we log if/when we are crashing
-#TODO CONFESS ON ERROR
-#TODO Logging for errors and fatals
-    #TODO include error handling for file not exist or any key not exist
-    #TODO confess with error message if any problems occur
+  Exits with a return value of 0 in case of complete success.
+  
+  Error exit states are:
+  
+  Warning exit states are:
+  
+=cut
+
+#TODO PERLDOC missing sections EXAMPLES | USAGE | REQUIRED ARGUMENTS | OPTIONS |
+#TODO                          DIAGNOSTICS | CONFIGURATION | DEPENDENCIES |
+#TODO                          INCOMPATABILITIES | BUGS AND LIMITATIONS"
+
+#TODO Error handling and exit states
+#TODO in case of warnings correct exit-state
+#TODO give an error message when croaking and setting the exit-state
