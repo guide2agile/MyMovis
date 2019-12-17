@@ -1,50 +1,20 @@
 #!/usr/bin/perl
 
+package MovisHelper;
+
 =head1 NAME
 
-IMDb_download - Program to download and unzip offline files from IMDb website
+MovisHelper - Various supporting subroutines for Movis project
 
 =head1 SYNOPSIS
 
-  IMDb_download [options]
-  
-    --option <filename>      Read the options from a file, not commandline
-    --source <web-page>      What web-page to use
-    --target <directory>     Directory to be used as target for the download
-    --file <filename>        Name of a .gz to download e.g. title.akas.tsv.gz
-                             file parameter can be repeated multiple times
-    --comment "qoted string" Comment to be noted for the file (one per file)
-    --quiet | noquiet        No output to standard output
-    --verbose | noverbose    Extended processing information on standard output
-    --help                   Show this help information
-    --manual                 Manual, the more elaborate help
-    --version                Show version number
-    
-  Defaults are, if parameters are omitted: 
-    --source https://datasets.imdbws.com/
-    --target ../data/imdb/
-    --file title.ratings.tsv.gz
-    --comment "rating and votes information for IMDb titles"
-    --file title.episode.tsv.gz
-    --comment "episode information for tv series"
-    --file title.basics.tsv.gz
-    --comment "titles in internet movie database (IMDb)"
-    --file title.akas.tsv.gz
-    --comment "alternatives for IMDb titles (also know as - AKA)"
-    --file title.crew.tsv.gz
-    --comment "director and writer information for all IMDb titles"
-    --file title.principals.tsv.gz
-    --comment "principal cast/crew for IMDb titles"
-    --file name.basics.tsv.gz
-    --comment "names in internet movie database (IMDb)"
-    --noquiet
-    --noverbose
+Use in other scripts as utility soubroutines
+
 =cut
 
 =head1 DESCRIPTION
 
-  Program to download the Internet Movie Database (IMDb) offline files. 
-  Downloaded from https://datasets.imdbws.com/
+  Various supporting subroutines
  
 =cut
 
@@ -66,6 +36,7 @@ IMDb_download - Program to download and unzip offline files from IMDb website
 
 use strict;
 use warnings;
+use Exporter 'import';
 use Carp;
 use Cwd qw(getcwd abs_path);
 use DateTime;
@@ -83,7 +54,9 @@ use String::Format;
 use Text::ParseWords;
 use YAML::AppConfig;
 
-our $VERSION = 0.7;
+our $VERSION = 0.1;
+our @EXPORT    = qw(inform inform_start inform_end get_logger read_parameters read_configfile fileparse abs_path clean_dir getcwd check_and_adapt_path file_download_unzip %download_file_comment $app_configfile $download_source_uri $app_data_dir $log_configfile @download_file_list $loggername $DEBUG $INFO $WARN $ERROR $FATAL);
+our @EXPORT_OK = qw(start_logging);
 
 #### error messages the system uses
 #
@@ -122,7 +95,7 @@ Readonly my $DEFAULT_LOG_WATCH_SEC   => 60;
 Readonly my $DEFAULT_LOGGER          => 'myMovis';
 Readonly my $DEFAULT_LOGLEVEL        => undef;
 Readonly my $DEFAULT_LOG_CONFIGFILE  => '../config/mymovis_logging.config';
-Readonly my $DEFAULT_CONFIG_FILE     => '../config/mymovis_config.yaml';
+Readonly my $DEFAULT_APP_CONFIGFILE     => '../config/mymovis_config.yaml';
 #
 # application data defaults
 Readonly my $DEFAULT_IMDB_TARGET_DIR => '../data/imdb/';
@@ -137,33 +110,33 @@ Readonly my $USAGE_SELECT_SECTIONS => 99;
 Readonly my $OS_DIR_SEP            => File::Spec->catfile( q{}, q{} );
 #
 # log levels
-Readonly my $DEBUG                 => 'DEBUG';
-Readonly my $INFO                  => 'INFO';
-Readonly my $WARN                  => 'WARN';
-Readonly my $ERROR                 => 'ERROR';
-Readonly my $FATAL                 => 'FATAL';
+Readonly our $DEBUG                 => 'DEBUG';
+Readonly our $INFO                  => 'INFO';
+Readonly our $WARN                  => 'WARN';
+Readonly our $ERROR                 => 'ERROR';
+Readonly our $FATAL                 => 'FATAL';
 
 #### global variable definitions
 # statistical data for the inform system
-my $start_time  = DateTime->now();
-my $debug_count = 0;
-my $info_count  = 0;
-my $warn_count  = 0;
-my $max_code    = 0;
+our $start_time  = DateTime->now();
+our $debug_count = 0;
+our $info_count  = 0;
+our $warn_count  = 0;
+our $max_code    = 0;
 #
 # effective values used (based on defaults -> config file -> commandline)
-my $app_configfile    = $DEFAULT_CONFIG_FILE;
-my $log_configfile    = $DEFAULT_LOG_CONFIGFILE;
-my $loggername        = $DEFAULT_LOGGER;
-my $log_level         = $DEFAULT_LOGLEVEL;
-my $log_watch_seconds = $DEFAULT_LOG_WATCH_SEC;
-my $opt_quiet         = $DEFAULT_PAR_OPT_QUIET;
-my $opt_verbose       = $DEFAULT_PAR_OPT_VERBOSE;
-my $opt_dump = 0;
-my %imdb_file_comment;
-my @imdb_file_list;
-my $imdb_source_uri;
-my $imdb_target_dir;
+our $app_configfile    = $DEFAULT_APP_CONFIGFILE;
+our $log_configfile    = $DEFAULT_LOG_CONFIGFILE;
+our $loggername        = $DEFAULT_LOGGER;
+our $log_level         = $DEFAULT_LOGLEVEL;
+our $log_watch_seconds = $DEFAULT_LOG_WATCH_SEC;
+our $opt_quiet         = $DEFAULT_PAR_OPT_QUIET;
+our $opt_verbose       = $DEFAULT_PAR_OPT_VERBOSE;
+our $opt_dump = 0;
+our %download_file_comment;
+our @download_file_list;
+our $download_source_uri;
+our $app_data_dir;
 
 #HTTP::Request->new( 'GET', 'https://datasets.imdbws.com/title.ratings.tsv.gz' );
 
@@ -178,10 +151,10 @@ sub inform {
     my $par_code     = shift;
     my $par_text     = shift;
     my @par_textvals = @_;
-    
+#TODO Same Functionality as inform_end if crashing, but without the exit ;-)
     # if variables %1 %2 etc in the $par_text then substitute with values from list
     if (@par_textvals) {
-    	my $counter = 1;
+       my $counter = 1;
        foreach my $value (@par_textvals) {
           $par_text =~ s/\%$counter/$value/gsxm;
           $counter++;
@@ -195,7 +168,10 @@ sub inform {
 
     my $ret_val;
 
-    #TODO map text-parameters into text
+    #if no logger given, try to get the default logger;
+    if (!defined($par_logger)) {
+       $par_logger = get_logger();
+    }
 
     # adapt console text (e.g. starts uppercase)
     my $console_text = $par_text . ".";
@@ -322,7 +298,9 @@ sub inform {
     }
     
     # if we got here, we have a problem. We should have exited or died above
-    $par_logger->fatal("   *** $par_level *** UNHANDLED INFORM CODE #$par_code *** $par_text");
+    if ($par_logger) {
+       $par_logger->fatal("   *** $par_level *** UNHANDLED INFORM CODE #$par_code *** $par_text");
+    }
     confess ("   *** $par_level *** UNHANDLED INFORM CODE #$par_code *** $par_text"); 
 }
 
@@ -340,6 +318,7 @@ sub start_logging {
 
     # initialize and configure logging as requested by parameters/defaults
     Log::Log4perl->init_and_watch( $log_configfile, $log_watch_seconds );
+    $Log::Log4perl::caller_depth = 1;
     my $logger = Log::Log4perl->get_logger($loggername);
     if ($log_level) { $logger->level($log_level) }
 
@@ -350,21 +329,41 @@ sub start_logging {
     return $logger;
 }
 
+=head2 get_logger
+
+Return logger for the given 
+
+=cut
+sub get_logger {
+    my $par_loggername = shift // $loggername;
+
+    my $logger = Log::Log4perl->get_logger($par_loggername);
+    return $logger;
+}
+
 =head2 inform_end
 
 Reports completion of the script setting exitstate to the value given
 
 =cut
 sub inform_end {
-    my $par_logger = shift;
-    my $par_exit   = shift;
+    my $par_logger = shift // undef;
+    my $par_exit   = shift // undef;
 
     # note $end_time and calculate how long the script ran
     my $end_time        = DateTime->now();
     my $end_time_string = $end_time->datetime(q{ });
     my $elapsed_time    = $end_time->epoch() - $start_time->epoch();
-
-    inform $INFO, $par_logger, 0, "script completed at %1 after %2 seconds", $end_time_string, $elapsed_time;
+    if (!defined($par_logger)) {
+       $par_logger = Log::Log4perl->get_logger($loggername);
+    }
+    if (!defined($par_exit)) {
+       $par_exit = $max_code / $HUNDREDS; 
+    }
+    if (defined($par_logger)) {
+       inform $INFO, $par_logger, 1, "script had %1 debug, %2 info, %3 warn messages logged", $debug_count, $info_count, $warn_count;
+       inform $INFO, $par_logger, 1, "script completed at %1 after %2 seconds", $end_time_string, $elapsed_time;
+    }
     exit $par_exit;
 }
 
@@ -404,6 +403,11 @@ sub clean_dir {
 sub read_parameters {
     my $parameter_ref = shift;
 
+    # if we are not told what we read from, we read from ARGV
+    if (!defined($parameter_ref)) {
+       $parameter_ref = \@ARGV;
+    }
+    
     # process options
     my @parameters_in_use = @$parameter_ref;
     my $parameter_string  = join q{ }, @parameters_in_use;
@@ -411,10 +415,10 @@ sub read_parameters {
         $parameter_ref,
 
         # data configuration
-        'files=s'          => \@imdb_file_list,
+        'files=s'          => \@download_file_list,
         'comments=s'       => \my @local_file_comment,
-        'source=s'         => \$imdb_source_uri,
-        'target=s'         => \$imdb_target_dir,
+        'source=s'         => \$download_source_uri,
+        'target=s'         => \$app_data_dir,
         'appconfig|yaml=s' => \$app_configfile,
         'logconfig=s'      => \$log_configfile,
         'logger=s'         => \$loggername,
@@ -454,12 +458,12 @@ sub read_parameters {
     if (@local_file_comment) {
         my $file_count = 0;
         my $one_comment;
-        foreach my $one_file (@imdb_file_list) {
+        foreach my $one_file (@download_file_list) {
             if ( defined( $local_file_comment[$file_count] ) ) {
                 $one_comment = $local_file_comment[$file_count];
             }
             $one_file =~ s/[.]gz$//sxm;
-            $imdb_file_comment{$one_file} = $one_comment;
+            $download_file_comment{$one_file} = $one_comment;
             $file_count++;
         }
     }
@@ -511,40 +515,40 @@ sub read_configfile {
         # inform, set defaults and return
         inform $WARN, $logger, $WAR_182, "working with yaml config "
                              . "'$app_configfile' failed, continuing without";
-        if ( !defined($imdb_target_dir) ) {
-            $imdb_target_dir = $DEFAULT_IMDB_TARGET_DIR;
+        if ( !defined($app_data_dir) ) {
+            $app_data_dir = $DEFAULT_IMDB_TARGET_DIR;
         }
-        if ( !defined($imdb_source_uri) ) {
-            $imdb_source_uri = $DEFAULT_IMDB_SOURCE;
+        if ( !defined($download_source_uri) ) {
+            $download_source_uri = $DEFAULT_IMDB_SOURCE;
         }
 
-        if (@imdb_file_list) {
-            @imdb_file_list = @DEFAULT_IMDB_FILE_LIST;
+        if (@download_file_list) {
+            @download_file_list = @DEFAULT_IMDB_FILE_LIST;
         }
         # file not found means nothing is left to do -> return
         return;
     }
-    if ( !defined($imdb_target_dir) ) {
+    if ( !defined($app_data_dir) ) {
         if ( defined( $yaml_config->get_IMDB()->{'directory'} ) ) {
-            $imdb_target_dir = $yaml_config->get_IMDB()->{'directory'};
+            $app_data_dir = $yaml_config->get_IMDB()->{'directory'};
         }
         else {
-            $imdb_target_dir = $DEFAULT_IMDB_TARGET_DIR;
+            $app_data_dir = $DEFAULT_IMDB_TARGET_DIR;
         }
     }
 
-    if ( !defined($imdb_source_uri) ) {
+    if ( !defined($download_source_uri) ) {
         if ( defined( $yaml_config->get_IMDB()->{'download'} ) ) {
-            $imdb_source_uri = $yaml_config->get_IMDB()->{'download'};
+            $download_source_uri = $yaml_config->get_IMDB()->{'download'};
         }
         else {
-            $imdb_source_uri = $DEFAULT_IMDB_SOURCE;
+            $download_source_uri = $DEFAULT_IMDB_SOURCE;
         }
     }
 
     # get the filenames only, if the list is empty
     my $get_filenames = 1;
-    if (@imdb_file_list) {
+    if (@download_file_list) {
         $get_filenames = 0;
     }
     my $counter = 0;
@@ -554,12 +558,42 @@ sub read_configfile {
         my $file_name =
           $yaml_config->get_IMDB()->{'files'}[$counter]{'filename'};
         if ($get_filenames) {
-            push @imdb_file_list, $file_name;
+            push @download_file_list, $file_name;
         }
-        $imdb_file_comment{$file_name} =
+        $download_file_comment{$file_name} =
           $yaml_config->get_IMDB()->{'files'}[$counter]{'comment'};
         $counter++;
     }
+    # make the config and directory path absolute
+    inform $DEBUG, $logger, 0, "locations - appconfig: $app_configfile, "
+                          . "logconfig: $log_configfile, target: $app_data_dir";
+
+    ( my $scriptname, my $script_directory, my $script_extension ) =
+      fileparse( $0, '\.[^.]*$' );
+    ( my $appconfig, my $appconfig_dir, my $appconfig_ext ) =
+      fileparse( $app_configfile, '\.[^.]*$' );
+    ( my $logconfig, my $logconfig_dir, my $logconfig_ext ) =
+      fileparse( $log_configfile, '\.[^.]*$' );
+    my $current_directory = abs_path( getcwd() ) . '/';
+    $app_data_dir = clean_dir(
+        check_and_adapt_path(
+            $app_data_dir, [ $current_directory, $script_directory ]
+        )
+    );
+    my $script_directory_list =
+      [ $script_directory, $current_directory, $app_data_dir, ];
+    my $current_directory_list =
+      [ $current_directory, $script_directory, $app_data_dir, ];
+    $appconfig_dir = check_and_adapt_path( $appconfig_dir, $script_directory_list,
+        $appconfig . $appconfig_ext );
+    $app_configfile = clean_dir( $appconfig_dir . $appconfig . $appconfig_ext );
+    $logconfig_dir   = check_and_adapt_path( $logconfig_dir, $script_directory_list,
+        $logconfig . $logconfig_ext );
+    $log_configfile = clean_dir( $logconfig_dir . $logconfig . $logconfig_ext );
+    
+    inform $DEBUG, $logger, 0, "absolute - appconfig: $app_configfile, "
+                         . "logconfig: $log_configfile, target: $app_data_dir";
+
 }
 
 =head2 gunzip_and_archive
@@ -605,11 +639,11 @@ sub gunzip_and_archive {
 
         # if the archive folder is missing, try to create it
         if ( !mkdir "$directory/archive/" ) {
-            inform $ERROR, $logger, $ERR_481, "archive '$imdb_target_dir/archive/'"
+            inform $ERROR, $logger, $ERR_481, "archive '$app_data_dir/archive/'"
                               . " does not exist and could not be created $!";
         }
         else {
-            inform $INFO, $logger, 0, "mkdir '$imdb_target_dir/archive/' "
+            inform $INFO, $logger, 0, "mkdir '$app_data_dir/archive/' "
                                     . "- archive folder created";
         }
     }
@@ -765,65 +799,7 @@ sub check_and_adapt_path {
 
 ############ MAIN ############
 
-# getting all that configuration values to be used and start logging
-read_parameters \@ARGV;
-my $logger = inform_start;
-read_configfile;
-
-# make the config and directory path absolute
-inform $DEBUG, $logger, 0, "locations - appconfig: $app_configfile, "
-                      . "logconfig: $log_configfile, target: $imdb_target_dir";
-
-( my $scriptname, my $script_directory, my $script_extension ) =
-  fileparse( $0, '\.[^.]*$' );
-( my $appconfig, my $appconfig_dir, my $appconfig_ext ) =
-  fileparse( $app_configfile, '\.[^.]*$' );
-( my $logconfig, my $logconfig_dir, my $logconfig_ext ) =
-  fileparse( $log_configfile, '\.[^.]*$' );
-my $current_directory = abs_path( getcwd() ) . '/';
-$imdb_target_dir = clean_dir(
-    check_and_adapt_path(
-        $imdb_target_dir, [ $current_directory, $script_directory ]
-    )
-);
-my $script_directory_list =
-  [ $script_directory, $current_directory, $imdb_target_dir, ];
-my $current_directory_list =
-  [ $current_directory, $script_directory, $imdb_target_dir, ];
-$appconfig_dir = check_and_adapt_path( $appconfig_dir, $script_directory_list,
-    $appconfig . $appconfig_ext );
-$app_configfile = clean_dir( $appconfig_dir . $appconfig . $appconfig_ext );
-$logconfig_dir   = check_and_adapt_path( $logconfig_dir, $script_directory_list,
-    $logconfig . $logconfig_ext );
-$log_configfile = clean_dir( $logconfig_dir . $logconfig . $logconfig_ext );
-
-inform $DEBUG, $logger, 0, "absolute - appconfig: $app_configfile, "
-                     . "logconfig: $log_configfile, target: $imdb_target_dir";
-# process list of files to download
-while ( my $imdb_file_to_download = shift @imdb_file_list ) {
-    file_download_unzip( $imdb_source_uri, $imdb_file_to_download, $imdb_target_dir,
-        $imdb_file_comment{$imdb_file_to_download} );
-}
-
-# mark completion and exit with success
-inform_end $logger, 0;
+1;
 
 __END__
 
-=head1 EXIT STATUS
-
-  Exits with a return value of 0 in case of complete success.
-  
-  Error exit states are:
-  
-  Warning exit states are:
-  
-=cut
-
-#TODO PERLDOC missing sections EXAMPLES | USAGE | REQUIRED ARGUMENTS | OPTIONS |
-#TODO                          DIAGNOSTICS | CONFIGURATION | DEPENDENCIES |
-#TODO                          INCOMPATABILITIES | BUGS AND LIMITATIONS"
-
-#TODO Error handling and exit states
-#TODO in case of warnings correct exit-state
-#TODO give an error message when croaking and setting the exit-state
